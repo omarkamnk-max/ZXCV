@@ -1,0 +1,62 @@
+name: RDP Windows 10
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2019 # أكثر استقراراً لبيئات وندوز 10
+
+    steps:
+      - name: Configure Windows 10 RDP Settings
+        run: |
+          # تفعيل Remote Desktop على Windows 10
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          # السماح للمنفذ 3389 عبر جدار حماية وندوز
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "RDP-Allow-3389" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -ErrorAction SilentlyContinue
+
+          # إعادة تشغيل الخدمة
+          Restart-Service -Name "TermService" -Force
+
+      - name: Create RDP User
+        run: |
+          $password = "SkyroPass@2026!"
+          $securePass = ConvertTo-SecureString$password -AsPlainText -Force
+          
+          # إنشاء المستخدم وإضافته لمجموعات الصلاحيات
+          New-LocalUser -Name "Skyro" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "Skyro" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Skyro" -ErrorAction SilentlyContinue
+
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Install & Setup Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile$installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-runner-$env:GITHUB_RUN_ID
+
+      - name: Fetch Tailscale IP & Connect
+        run: |
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 12) {
+              Start-Sleep -Seconds 5
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              $retries++
+          }
+
+          Write-Host "`n=========================================="
+          Write-Host " IP Address : $tsIP"
+          Write-Host " Username   : Skyro"
+          Write-Host " Password   : $env:RDP_PASS"
+          Write-Host "==========================================
+          
